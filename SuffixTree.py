@@ -7,6 +7,8 @@ from string import ascii_lowercase
 from datetime import datetime
 from typing import List, Iterable, Sized
 from array import array
+from SparseRMQ import construct_sparse_table
+from sys import maxsize
 
 
 @dataclass
@@ -42,28 +44,35 @@ class ActivePoint:
 
 
 class SuffixTree:
-
     __sentinels__ = ('$', '@', '*', '&' '%', '#')  # lexicographically lower than chars of input string
 
     def __init__(self, s: [str, Iterable, Sized]):
         if type(s) == str:
             self.s = s + SuffixTree.__sentinels__[0]
         else:
-            """Generalized suffix tree"""
-            assert(len(s) <= len(SuffixTree.__sentinels__))
+            #  Generalized suffix tree
+            assert (len(s) <= len(SuffixTree.__sentinels__)), "not enough sentinels for the strings"
             self.s = ''.join([p[0] + p[1] for p in zip(s, SuffixTree.__sentinels__)])  # append sentinels to strings
+
         self.root = SuffixNode(0, End(-1))
         self.a = ActivePoint(self.root, 0, 0)
         self.end = End(-1)
         self.rem = 0
         self.SA = None
+        self.subtree_sizes = None
+
+        #  incase LCA queries are made
+        self.E = None
+        self.D = None
+        self.R = None
+        self.sparse = None
 
     def build_suffix_tree(self):
 
         for i, c in enumerate(self.s):
             self._start_phase(i)
 
-        self._set_indices()
+        self.create_labels()
 
     def _start_phase(self, i):
         last_node = None
@@ -143,9 +152,6 @@ class SuffixTree:
             return self.get_next_character(i)
         return None
 
-    def create_labels(self):
-        pass
-
     def select_edge(self):
         return self.a.active_node.out[self.s[self.a.active_edge]]
 
@@ -164,11 +170,27 @@ class SuffixTree:
         return internal_node
 
     def count_leaves(self):
-        pass
+        """Counts the number of leaves per node of the tree"""
+
+        self.subtree_sizes = {}
+
+        def helper(node: SuffixNode, st_size) -> int:
+            if len(node.out) == 0:
+                st_size[node] = 1
+                return 1
+            else:
+                s = 0
+                for k in node.out:
+                    s += helper(node.out[k], st_size)
+                st_size[node] = s
+                return s
+
+        size = helper(self.root, self.subtree_sizes)
+        assert size == len(self.s)
 
     def build_suffix_array(self):
-        """naive suffix array algorithm"""
-        self.SA = []
+        """naive suffix array algorithm using lexicographical depth first search"""
+        self.SA = array('l')
 
         def helper(u):
             if len(u.out) == 0:
@@ -181,33 +203,33 @@ class SuffixTree:
             helper(self.root.out[node])
         return self.SA
 
-    def has_substring(self, t) -> bool:
-        """If pattern is found in the text, returns the starting position of the pattern"""
-        if type(t) != str:
-            raise TypeError("search string must be a string, not", type(t))
+    def find_wrapper(self, t, rt=''):
 
         def helper(edge, pattern, i):
             if pattern[i] in edge.out:
                 new_root = edge.out[pattern[i]]
 
-                if len(new_root) + 1 >= len(pattern) - i:
-                    n = 0
-                    while n < len(pattern) - i:
-                        if self.s[new_root.start + n] != pattern[i + n]:
+                if len(new_root) + 1 >= len(pattern) - i:  # the whole pattern might be contained in this edge
+                    k = 0
+                    while k < len(pattern) - i:
+                        if self.s[new_root.start + k] != pattern[i + k]:
                             print("pattern not in text")
-                            return False
-                        n += 1
+                            return -1
+                        k += 1
                     else:
-                        return self.root.out[pattern[0]].start
+                        if rt == 'node':
+                            return new_root
+                        else:
+                            return new_root.start
 
-                else:
+                else:  # try to visit next edge
                     if self.s[new_root.start: new_root.end.end + 1] == pattern[i: i + len(new_root) + 1]:
                         i += len(new_root) + 1  # new starting position
                         return helper(new_root, pattern, i)
                     else:
-                        return False
+                        return -1
             else:
-                return False
+                return -1
 
         if t == '':
             print("empty suffix exists")
@@ -218,16 +240,62 @@ class SuffixTree:
         else:
             return helper(self.root, t, 0)
 
-    def prod_lca(self):
+    def find(self, t) -> int:
+        """If pattern is found in the text, returns the starting position of the pattern
+        else return -1"""
+        return self.find_wrapper(t, '')
+
+    def number_of_occurrences(self, t):
+        node = self.find_wrapper(t, 'node')
+        assert self.subtree_sizes is not None
+        return node.start, self.subtree_sizes[node]
+
+    def euler_tour(self, source=None):
+        E = []
+        D = []
+        R = {}
+        if self.root is None:
+            raise ValueError("Build cartesian tree first")
+
+        def euler_visit(curr_node, nodes, depths, rep, curr_depth, index):
+            depths.append(curr_depth)
+            nodes.append(curr_node)
+            if curr_node not in rep:
+                rep[curr_node] = index
+
+            if len(curr_node.out) > 0:
+                for k in curr_node.out:
+                    index = euler_visit(curr_node.out[k], nodes, depths, rep, curr_depth + 1, index + 1)
+                    nodes.append(curr_node)
+                    depths.append(curr_depth)
+                    index += 1
+            return index
+
+        if source is None:
+            source = self.root
+        euler_visit(source, E, D, R, 0, 0)
+        # print('->'.join(map(str, E)))
+        return E, D, R
+
+    def preprocess_lca(self):
+        """perform an euler tour and save the depths of the nodes
+        LCA(i, j) = E[RMQ_D(i, j)]"""
+
+        # perform Euler tour and get the depths, representative, and node arrays
+        self.E, self.D, self.R = self.euler_tour()
+        sparse = array('l', [maxsize] * len(self.E))
+        construct_sparse_table(self.D, sparse)
+        self.sparse = sparse
+    
+    def get_lca(self):
         pass
 
-    def _set_indices(self) -> None:
-
-        l = len(self.s)  # length of the text in the suffix tree
+    def create_labels(self) -> None:
+        n = len(self.s)  # length of the text in the suffix tree
 
         def helper(node, carried_length):
             if len(node.out) == 0:  # we are at a leaf node
-                node.index = l - (carried_length + len(node) + 1)
+                node.index = n - (carried_length + len(node) + 1)
 
             else:
                 j = len(node) + 1  # the number of characters in this edge
@@ -237,33 +305,30 @@ class SuffixTree:
         for key in self.root.out:
             helper(self.root.out[key], 0)
 
+    def _print_leaf_labels(self):
+        """Debugging method to check whether self.create_labels() has been called successfully"""
+
+        def helper(node, text):
+            if len(node.out) == 0:
+                print(node.index, ':', text[node.index:])
+            else:
+                for k in node.out:
+                    helper(node.out[k], text)
+        helper(self.root, self.s)
+
     def bwt(self):
+        """Burrows-Wheeler Transform"""
         assert (self.SA is not None)
         n = len(self.SA)  # the length of BWT is the same as that of a SUFFIX ARRAY
-        bwt = []
+        bwt = bytearray(n)
         for i in range(n):
-            bwt.append((self.s[self.SA[i] - 1] if self.SA[i] > 0 else '$'))
-        return ''.join(bwt)
+            bwt[i] = ord(self.s[self.SA[i] - 1])
+        return bwt
 
     def lcp_kasai(self):
         """Linear time LCP construction
-        vector<int> kasai(string s, vector<int> sa){
-
-        int n=s.size(),k=0;
-        vector<int> lcp(n,0);
-        vector<int> rank(n,0);
-
-        for(int i=0; i<n; i++) rank[sa[i]]=i;
-
-        for(int i=0; i<n; i++, k?k--:0)
-        {
-            if(rank[i]==n-1) {k=0; continue;}
-            int j=sa[rank[i]+1];
-            while(i+k<n && j+k<n && s[i+k]==s[j+k]) k++;
-            lcp[rank[i]]=k;
-        }
-        return lcp;
-        }"""
+        Has poor locality of reference
+        """
         assert (self.SA is not None), "Empty Suffix Array"
         n = len(self.SA)
         h = 0
@@ -277,12 +342,13 @@ class SuffixTree:
                 while self.s[i + h] == self.s[k + h]:
                     h += 1
                 LCP[ISA[i]] = h
-                if h > 0: h -= 1
+                if h > 0:
+                    h -= 1
         return LCP
 
     def prod_lcp_array(self):
         """O(n^2) time
-        Very naive"""
+        naive"""
         assert (self.SA is not None), "Empty Suffix Array"
         lcp_array = [0]
         for i in range(len(self.SA) - 1):  # O(n - 1) + O(n) + c1
@@ -321,23 +387,33 @@ class SuffixTree:
 
 
 if __name__ == '__main__':
+    # alpha = ['A', 'G', 'T', 'C']
     # while True:
-    #     input_size = 3000_000
-    #     test = ''.join([choice(ascii_lowercase) for _ in range(input_size)])
+    #     input_size = 300_000
+    #     test = ''.join([choice(alpha) for _ in range(input_size)])
     #     ukk = SuffixTree(test)
+    #     tic = datetime.now()
     #     ukk.build_suffix_tree()
+    #     toc = datetime.now()
+    #     print("Ukkonen ran in", (toc - tic).total_seconds(), "seconds for input size", input_size)
     #     ukk.SA = ukk.build_suffix_array()
-    #     t1 = datetime.now()
-    #     print("LCP naive ran in ", (datetime.now() - t1).total_seconds(), "for input size", input_size)
-    #     t3 = datetime.now()
-    #     ukk.lcp_kasai()
-    #     print("Kasai ran in ", (datetime.now() - t3).total_seconds(), "for input size", input_size)
+    #     # t1 = datetime.now()
+    #     # print("LCP naive ran in ", (datetime.now() - t1).total_seconds(), "for input size", input_size)
+    #     # t2 = datetime.now()
+    #     # ukk.lcp_kasai()
+    #     # print("Kasai ran in ", (datetime.now() - t2).total_seconds(), "for input size", input_size)
     #     break
 
-    ST = SuffixTree('Tomorrow_and_tomorrow_and_tomorrow')
+    ST = SuffixTree('abaabacadabra')
     ST.build_suffix_tree()
-    S = ST.produce_text()
+    ST.create_labels()
+    ST.preprocess_lca()
+    ST.count_leaves()
+    print(ST.subtree_sizes[ST.root])
+    # S = ST.produce_text()
     SA = ST.build_suffix_array()
-    LCP = ST.prod_lcp_array()
-    LCP_KASAI = ST.lcp_kasai()
-    BWT = ST.bwt()
+    print(SA)
+    # LCP = ST.prod_lcp_array()
+    # LCP_KASAI = ST.lcp_kasai()
+    # BWT = ST.bwt()
+    # print(BWT)
