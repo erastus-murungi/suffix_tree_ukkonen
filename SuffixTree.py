@@ -7,8 +7,7 @@ from string import ascii_lowercase
 from datetime import datetime
 from typing import List, Iterable, Sized
 from array import array
-from SparseRMQ import construct_sparse_table
-from sys import maxsize
+from SparseRMQ import construct_sparse_table, query_sparse_table, euler_tour
 
 
 @dataclass
@@ -17,8 +16,8 @@ class End:
 
 
 class SuffixNode:
-    """A class representing an edge in a suffix tree
-    If self.out is empty, then the edge is just a leaf node
+    """A class representing an edge in a suffix tree.
+    If self.out is empty, then the edge is just a leaf node.
     """
 
     def __init__(self, start, end):
@@ -189,7 +188,7 @@ class SuffixTree:
         assert size == len(self.s)
 
     def build_suffix_array(self):
-        """naive suffix array algorithm using lexicographical depth first search"""
+        """O(len(s)) Suffix array algorithm using lexicographical depth first search."""
         self.SA = array('l')
 
         def helper(u):
@@ -204,6 +203,7 @@ class SuffixTree:
         return self.SA
 
     def find_wrapper(self, t, rt=''):
+        """Wrapper method which finds the substring t in self.s."""
 
         def helper(edge, pattern, i):
             if pattern[i] in edge.out:
@@ -233,16 +233,16 @@ class SuffixTree:
 
         if t == '':
             print("empty suffix exists")
-            return False
+            return -1
         if t == '$':
             print("$ is used as a sentinel in this suffix tree")
-            return True
+            return -1
         else:
             return helper(self.root, t, 0)
 
     def find(self, t) -> int:
         """If pattern is found in the text, returns the starting position of the pattern
-        else return -1"""
+        else return -1."""
         return self.find_wrapper(t, '')
 
     def number_of_occurrences(self, t):
@@ -250,45 +250,53 @@ class SuffixTree:
         assert self.subtree_sizes is not None
         return node.start, self.subtree_sizes[node]
 
-    def euler_tour(self, source=None):
-        E = []
-        D = []
-        R = {}
-        if self.root is None:
-            raise ValueError("Build cartesian tree first")
-
-        def euler_visit(curr_node, nodes, depths, rep, curr_depth, index):
-            depths.append(curr_depth)
-            nodes.append(curr_node)
-            if curr_node not in rep:
-                rep[curr_node] = index
-
-            if len(curr_node.out) > 0:
-                for k in curr_node.out:
-                    index = euler_visit(curr_node.out[k], nodes, depths, rep, curr_depth + 1, index + 1)
-                    nodes.append(curr_node)
-                    depths.append(curr_depth)
-                    index += 1
-            return index
-
-        if source is None:
-            source = self.root
-        euler_visit(source, E, D, R, 0, 0)
-        # print('->'.join(map(str, E)))
-        return E, D, R
-
     def preprocess_lca(self):
-        """perform an euler tour and save the depths of the nodes
-        LCA(i, j) = E[RMQ_D(i, j)]"""
+        """Performs an euler tour and save the depths of the nodes.
+        LCA(i, j) = E[RMQ_D(i, j)]."""
 
         # perform Euler tour and get the depths, representative, and node arrays
-        self.E, self.D, self.R = self.euler_tour()
-        sparse = array('l', [maxsize] * len(self.E))
-        construct_sparse_table(self.D, sparse)
+        self.E, self.D, self.R = euler_tour(self.root)
+        sparse = construct_sparse_table(self.D)
         self.sparse = sparse
-    
-    def get_lca(self):
-        pass
+
+    @staticmethod
+    def visit_subtree(node, pos):
+        """Visits the subtree of the given node and saves the offsets at the leaf nodes in the given array."""
+        if len(node.out) == 0:
+            pos.append(node.index)
+        else:
+            for k in node.out:
+                SuffixTree.visit_subtree(node.out[k], pos)
+
+    def find_all_matches(self, pattern):
+        """Finds all the starting positions of pattern in the text"""
+        node = self.find_wrapper(pattern, 'node')
+        if node == -1:
+            print("node not found")
+            return -1
+        else:
+            # visit all leaves and report offsets
+            pos = []
+            self.visit_subtree(node, pos)
+            return pos
+
+    def get_lca(self, a, b):
+        """Find the node which is the lowest common ancestor of the self.s[a:] and self.s[b:]"""
+        assert self.sparse is not None, "construct the sparse table first"
+        t1 = self.find_wrapper(self.s[a:], 'node')
+        if t1 == -1:
+            raise LookupError(str(t1) + "not found")
+        t2 = self.find_wrapper(self.s[b:], 'node')
+        if t2 == -1:
+            raise LookupError(str(t2) + "not found")
+        i, j = self.R[t1], self.R[t2]
+        x = query_sparse_table(i, j, self.D, self.sparse)
+        y = self.E[x]
+        if y is self.root:
+            print(t1, "and ", t2, "have no common ancestor")
+        else:
+            print(self.s[: y.start + 1])
+            return y
 
     def create_labels(self) -> None:
         n = len(self.s)  # length of the text in the suffix tree
@@ -314,6 +322,7 @@ class SuffixTree:
             else:
                 for k in node.out:
                     helper(node.out[k], text)
+
         helper(self.root, self.s)
 
     def bwt(self):
@@ -332,8 +341,8 @@ class SuffixTree:
         assert (self.SA is not None), "Empty Suffix Array"
         n = len(self.SA)
         h = 0
-        ISA = [0] * n  # create an inverse suffix array/ also known as rank
-        LCP = [0] * n
+        ISA = array('l', [0] * n)  # create an inverse suffix array/ also known as rank
+        LCP = array('l', [0] * n)
         for i in range(n):  # fill the inverse suffix array
             ISA[self.SA[i]] = i
         for i in range(n):
@@ -350,7 +359,7 @@ class SuffixTree:
         """O(n^2) time
         naive"""
         assert (self.SA is not None), "Empty Suffix Array"
-        lcp_array = [0]
+        lcp_array = array('i', [0])
         for i in range(len(self.SA) - 1):  # O(n - 1) + O(n) + c1
             k = 0  # c_2
             while self.s[self.SA[i] + k] == self.s[self.SA[i + 1] + k]:
@@ -409,11 +418,13 @@ if __name__ == '__main__':
     ST.create_labels()
     ST.preprocess_lca()
     ST.count_leaves()
-    print(ST.subtree_sizes[ST.root])
+    p = ST.find_all_matches('a')
+    print(p)
     # S = ST.produce_text()
     SA = ST.build_suffix_array()
     print(SA)
-    # LCP = ST.prod_lcp_array()
-    # LCP_KASAI = ST.lcp_kasai()
-    # BWT = ST.bwt()
-    # print(BWT)
+    LCP = ST.prod_lcp_array()
+    LCP_KASAI = ST.lcp_kasai()
+    print(LCP_KASAI)
+    BWT = ST.bwt()
+    print(BWT)
